@@ -14,54 +14,11 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_fountain_key_123';
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/fountain';
 const PORT = process.env.PORT || 5000;
 
-// Σταθερή διεύθυνση Frontend στο Vercel για αποφυγή σφαλμάτων 404
+// Σταθερή διεύθυνση Frontend στο Vercel
 const CLIENT_URL = 'https://fountain-frontend.vercel.app';
 
 // Initialize Stripe
 const stripe = Stripe(STRIPE_SECRET_KEY);
-
-// --- STRIPE WEBHOOK ENDPOINT ---
-// Μπαίνει ΠΡΙΝ το express.json() για την σωστή επαλήθευση του raw body από τη Stripe
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    try {
-        if (STRIPE_WEBHOOK_SECRET) {
-            event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-        } else {
-            event = JSON.parse(req.body.toString());
-        }
-    } catch (err) {
-        console.error(`Webhook Error: ${err.message}`);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    // Καταγραφή της ευχής στη βάση δεδομένων μετά την ολοκλήρωση της πληρωμής
-    if (event.type === 'checkout.session.completed') {
-        const session = event.data.object;
-        const metadata = session.metadata || {};
-
-        try {
-            const newWish = new Wish({
-                text: metadata.wishText || 'Wish Fountain Coin',
-                isPublic: metadata.isPublic === 'true',
-                author: metadata.author || 'Anonymous',
-                userId: metadata.userId ? metadata.userId : null
-            });
-            await newWish.save();
-            console.log('Wish saved successfully to DB:', newWish);
-        } catch (dbErr) {
-            console.error('Error saving wish to DB via webhook:', dbErr);
-        }
-    }
-
-    res.json({ received: true });
-});
-
-// Middlewares για τα υπόλοιπα JSON Endpoints
-app.use(express.json());
-app.use(cors());
 
 // --- SCHEMAS & MODELS ---
 
@@ -80,6 +37,62 @@ const wishSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 const Wish = mongoose.model('Wish', wishSchema);
+
+// --- STRIPE WEBHOOK ENDPOINT ---
+// Μπαίνει ΠΡΙΝ το express.json() για την επαλήθευση του raw body
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+        if (STRIPE_WEBHOOK_SECRET) {
+            event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+        } else {
+            event = JSON.parse(req.body.toString());
+        }
+    } catch (err) {
+        console.error(`Webhook Error: ${err.message}`);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Καταγραφή της ευχής μετά την πληρωμή
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const metadata = session.metadata || {};
+
+        try {
+            const newWish = new Wish({
+                text: metadata.wishText || 'Wish Fountain Coin',
+                isPublic: metadata.isPublic === 'true',
+                author: metadata.author || 'Anonymous',
+                userId: metadata.userId ? metadata.userId : null
+            });
+            await newWish.save();
+            console.log('Wish saved successfully to DB via Webhook:', newWish);
+        } catch (dbErr) {
+            console.error('Error saving wish to DB via webhook:', dbErr);
+        }
+    }
+
+    res.json({ received: true });
+});
+
+// Middlewares για τα υπόλοιπα JSON Endpoints
+app.use(express.json());
+app.use(cors());
+
+// --- MIDDLEWARE ΕΠΑΛΗΘΕΥΣΗΣ JWT ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (!token) return res.status(401).json({ message: 'Απαιτείται σύνδεση χρήστη.' });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ message: 'Μη έγκυρο token.' });
+        req.user = user;
+        next();
+    });
+};
 
 // --- AUTHENTICATION ENDPOINTS ---
 
@@ -138,6 +151,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // --- WISHES ENDPOINTS ---
 
+// Όλες οι δημόσιες ευχές (για την αρχική σελίδα)
 app.get('/api/wishes', async (req, res) => {
     try {
         const wishes = await Wish.find({ isPublic: true }).sort({ createdAt: -1 });
@@ -147,14 +161,25 @@ app.get('/api/wishes', async (req, res) => {
     }
 });
 
-app.post('/api/wishes', async (req, res) => {
+// Οι ευχές του συνδεδεμένου χρήστη
+app.get('/api/wishes/my-wishes', authenticateToken, async (req, res) => {
     try {
-        const { text, isPublic, author, userId } = req.body;
+        const myWishes = await Wish.find({ userId: req.user.id }).sort({ createdAt: -1 });
+        res.json(myWishes);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// Απευθείας δημιουργία ευχής (χωρίς πληρωμή, αν χρειάζεται)
+app.post('/api/wishes', authenticateToken, async (req, res) => {
+    try {
+        const { text, isPublic } = req.body;
         const newWish = new Wish({ 
             text, 
             isPublic: isPublic !== undefined ? isPublic : true, 
-            author: author || 'Anonymous', 
-            userId: userId || null 
+            author: req.user.username, 
+            userId: req.user.id 
         });
         await newWish.save();
         res.status(201).json(newWish);
@@ -163,11 +188,36 @@ app.post('/api/wishes', async (req, res) => {
     }
 });
 
+// Επεξεργασία ευχής από τον δημιουργό της
+app.put('/api/wishes/:id', authenticateToken, async (req, res) => {
+    try {
+        const { text, isPublic } = req.body;
+        const wish = await Wish.findById(req.params.id);
+
+        if (!wish) {
+            return res.status(404).json({ message: 'Η ευχή δεν βρέθηκε.' });
+        }
+
+        // Έλεγχος αν η ευχή ανήκει στον συνδεδεμένο χρήστη
+        if (!wish.userId || wish.userId.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Δεν έχετε δικαίωμα επεξεργασίας αυτής της ευχής.' });
+        }
+
+        if (text !== undefined) wish.text = text;
+        if (isPublic !== undefined) wish.isPublic = isPublic;
+
+        await wish.save();
+        res.json(wish);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
 // --- STRIPE CHECKOUT SESSION ENDPOINT ---
 
-app.post('/api/create-checkout-session', async (req, res) => {
+app.post('/api/create-checkout-session', authenticateToken, async (req, res) => {
     try {
-        const { wishText, isPublic, author, userId } = req.body;
+        const { wishText, isPublic } = req.body;
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -186,8 +236,8 @@ app.post('/api/create-checkout-session', async (req, res) => {
             metadata: {
                 wishText: wishText || '',
                 isPublic: String(isPublic),
-                author: author || 'Anonymous',
-                userId: userId || ''
+                author: req.user.username,
+                userId: req.user.id
             },
             success_url: `${CLIENT_URL}/?success=true`,
             cancel_url: `${CLIENT_URL}/?canceled=true`,
