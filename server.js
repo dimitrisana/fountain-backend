@@ -2,22 +2,25 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
-const jwt = require('jwt-simple'); // ή jsonwebtoken
-const jwtLib = require('jsonwebtoken');
+const jwt = require('jsonwebtoken');
 const Stripe = require('stripe');
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-// Initialize Stripe (Χρησιμοποιεί το Secret Key από το .env / Render)
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_key');
-
+// Environment Variables
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_dummy_key';
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_fountain_key_123';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/fountain';
+const PORT = process.env.PORT || 5000;
+const CLIENT_URL = process.env.CLIENT_URL || 'https://dimitrisana.github.io/fountain-backend'; // Ή το frontend URL σου
+
+// Initialize Stripe
+const stripe = Stripe(STRIPE_SECRET_KEY);
 
 // --- SCHEMAS & MODELS ---
 
-// User Schema
 const userSchema = new mongoose.Schema({
     username: { type: String, required: true, unique: true },
     password: { type: String, required: true },
@@ -25,9 +28,10 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
-// Wish Schema
 const wishSchema = new mongoose.Schema({
     text: { type: String, required: true },
+    isPublic: { type: Boolean, default: true },
+    author: { type: String, default: 'Anonymous' },
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     createdAt: { type: Date, default: Date.now }
 });
@@ -35,7 +39,6 @@ const Wish = mongoose.model('Wish', wishSchema);
 
 // --- AUTHENTICATION ENDPOINTS ---
 
-// Signup Route
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -52,7 +55,7 @@ app.post('/api/auth/signup', async (req, res) => {
         const newUser = new User({ username, password: hashedPassword });
         await newUser.save();
 
-        const token = jwtLib.sign({ id: newUser._id, username: newUser.username }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ id: newUser._id, username: newUser.username }, JWT_SECRET, { expiresIn: '7d' });
 
         res.status(201).json({
             message: 'User created successfully',
@@ -64,7 +67,6 @@ app.post('/api/auth/signup', async (req, res) => {
     }
 });
 
-// Login Route
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -78,7 +80,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ message: 'Invalid credentials.' });
         }
 
-        const token = jwtLib.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+        const token = jwt.sign({ id: user._id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
 
         res.json({
             message: 'Login successful',
@@ -94,7 +96,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/wishes', async (req, res) => {
     try {
-        const wishes = await Wish.find().sort({ createdAt: -1 });
+        const wishes = await Wish.find({ isPublic: true }).sort({ createdAt: -1 });
         res.json(wishes);
     } catch (err) {
         res.status(500).json({ message: err.message });
@@ -103,8 +105,13 @@ app.get('/api/wishes', async (req, res) => {
 
 app.post('/api/wishes', async (req, res) => {
     try {
-        const { text, userId } = req.body;
-        const newWish = new Wish({ text, userId: userId || null });
+        const { text, isPublic, author, userId } = req.body;
+        const newWish = new Wish({ 
+            text, 
+            isPublic: isPublic !== undefined ? isPublic : true, 
+            author: author || 'Anonymous', 
+            userId: userId || null 
+        });
         await newWish.save();
         res.status(201).json(newWish);
     } catch (err) {
@@ -112,27 +119,43 @@ app.post('/api/wishes', async (req, res) => {
     }
 });
 
-// --- STRIPE PAYMENT ENDPOINT ---
+// --- STRIPE CHECKOUT SESSION ENDPOINT ---
 
-app.post('/api/create-payment-intent', async (req, res) => {
+app.post('/api/create-checkout-session', async (req, res) => {
     try {
-        const { amount } = req.body; // Ποσό σε cents (π.χ. 100 = 1.00€)
-        
-        const paymentIntent = await stripe.paymentIntents.create({
-            amount: amount || 100, // Default 1€
-            currency: 'eur',
-            automatic_payment_methods: { enabled: true },
+        const { wishText, isPublic, author, userId } = req.body;
+
+        const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [{
+                price_data: {
+                    currency: 'eur',
+                    product_data: {
+                        name: 'Make a Wish ✨',
+                        description: wishText ? `Wish: "${wishText}"` : 'Wish Fountain Coin',
+                    },
+                    unit_amount: 100, // 1.00 EUR
+                },
+                quantity: 1,
+            }],
+            mode: 'payment',
+            metadata: {
+                wishText: wishText || '',
+                isPublic: String(isPublic),
+                author: author || 'Anonymous',
+                userId: userId || ''
+            },
+            success_url: `${CLIENT_URL}?success=true`,
+            cancel_url: `${CLIENT_URL}?canceled=true`,
         });
 
-        res.json({ clientSecret: paymentIntent.client_secret });
+        res.json({ id: session.id });
     } catch (err) {
-        res.status(500).json({ message: 'Payment Intent Error', error: err.message });
+        res.status(500).json({ message: 'Stripe Checkout Error', error: err.message });
     }
 });
 
-// Database Connection & Server Listen
-const MONGO_URI = process.env.MONGO_URI;
-const PORT = process.env.PORT || 5000;
+// --- DATABASE & SERVER START ---
 
 mongoose.connect(MONGO_URI)
     .then(() => {
