@@ -13,10 +13,55 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_fountain_key_123';
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/fountain';
 const PORT = process.env.PORT || 5000;
-const CLIENT_URL = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'https://fountain-frontend.vercel.app';
+
+// Σταθερή διεύθυνση Frontend στο Vercel για αποφυγή σφαλμάτων 404
+const CLIENT_URL = 'https://fountain-frontend.vercel.app';
 
 // Initialize Stripe
 const stripe = Stripe(STRIPE_SECRET_KEY);
+
+// --- STRIPE WEBHOOK ENDPOINT ---
+// Μπαίνει ΠΡΙΝ το express.json() για την σωστή επαλήθευση του raw body από τη Stripe
+app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    const sig = req.headers['stripe-signature'];
+    let event;
+
+    try {
+        if (STRIPE_WEBHOOK_SECRET) {
+            event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+        } else {
+            event = JSON.parse(req.body.toString());
+        }
+    } catch (err) {
+        console.error(`Webhook Error: ${err.message}`);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // Καταγραφή της ευχής στη βάση δεδομένων μετά την ολοκλήρωση της πληρωμής
+    if (event.type === 'checkout.session.completed') {
+        const session = event.data.object;
+        const metadata = session.metadata || {};
+
+        try {
+            const newWish = new Wish({
+                text: metadata.wishText || 'Wish Fountain Coin',
+                isPublic: metadata.isPublic === 'true',
+                author: metadata.author || 'Anonymous',
+                userId: metadata.userId ? metadata.userId : null
+            });
+            await newWish.save();
+            console.log('Wish saved successfully to DB:', newWish);
+        } catch (dbErr) {
+            console.error('Error saving wish to DB via webhook:', dbErr);
+        }
+    }
+
+    res.json({ received: true });
+});
+
+// Middlewares για τα υπόλοιπα JSON Endpoints
+app.use(express.json());
+app.use(cors());
 
 // --- SCHEMAS & MODELS ---
 
@@ -35,49 +80,6 @@ const wishSchema = new mongoose.Schema({
     createdAt: { type: Date, default: Date.now }
 });
 const Wish = mongoose.model('Wish', wishSchema);
-
-// --- STRIPE WEBHOOK ENDPOINT ---
-// Πρέπει να μπει ΠΡΙΝ το app.use(express.json()) επειδή η Stripe απαιτεί raw body για την επαλήθευση υπογραφής.
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-    const sig = req.headers['stripe-signature'];
-    let event;
-
-    try {
-        if (STRIPE_WEBHOOK_SECRET) {
-            event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-        } else {
-            event = JSON.parse(req.body.toString());
-        }
-    } catch (err) {
-        console.error(`Webhook Error: ${err.message}`);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    // Διαχείριση επιτυχούς πληρωμής
-    if (event.type === 'checkout.session.completed') {
-        const session = event.data.object;
-        const metadata = session.metadata || {};
-
-        try {
-            const newWish = new Wish({
-                text: metadata.wishText || 'Wish Fountain Coin',
-                isPublic: metadata.isPublic === 'true',
-                author: metadata.author || 'Anonymous',
-                userId: metadata.userId ? metadata.userId : null
-            });
-            await newWish.save();
-            console.log('Wish saved successfully after payment:', newWish);
-        } catch (dbErr) {
-            console.error('Error saving wish to DB via webhook:', dbErr);
-        }
-    }
-
-    res.json({ received: true });
-});
-
-// Middleware για τα υπόλοιπα JSON endpoints
-app.use(express.json());
-app.use(cors());
 
 // --- AUTHENTICATION ENDPOINTS ---
 
