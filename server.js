@@ -55,7 +55,7 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, 
         return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
-    // Καταγραφή της ευχής μετά την πληρωμή
+    // Καταγραφή της ευχής μετά την ολοκλήρωση πληρωμής
     if (event.type === 'checkout.session.completed') {
         const session = event.data.object;
         const metadata = session.metadata || {};
@@ -151,7 +151,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 // --- WISHES ENDPOINTS ---
 
-// Όλες οι δημόσιες ευχές (για την αρχική σελίδα)
+// Όλες οι δημόσιες ευχές
 app.get('/api/wishes', async (req, res) => {
     try {
         const wishes = await Wish.find({ isPublic: true }).sort({ createdAt: -1 });
@@ -171,7 +171,7 @@ app.get('/api/wishes/my-wishes', authenticateToken, async (req, res) => {
     }
 });
 
-// Απευθείας δημιουργία ευχής (χωρίς πληρωμή, αν χρειάζεται)
+// Απευθείας δημιουργία ευχής
 app.post('/api/wishes', authenticateToken, async (req, res) => {
     try {
         const { text, isPublic } = req.body;
@@ -188,7 +188,7 @@ app.post('/api/wishes', authenticateToken, async (req, res) => {
     }
 });
 
-// Επεξεργασία ευχής από τον δημιουργό της
+// Επεξεργασία ευχής από τον κάτοχό της
 app.put('/api/wishes/:id', authenticateToken, async (req, res) => {
     try {
         const { text, isPublic } = req.body;
@@ -198,7 +198,6 @@ app.put('/api/wishes/:id', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Η ευχή δεν βρέθηκε.' });
         }
 
-        // Έλεγχος αν η ευχή ανήκει στον συνδεδεμένο χρήστη
         if (!wish.userId || wish.userId.toString() !== req.user.id) {
             return res.status(403).json({ message: 'Δεν έχετε δικαίωμα επεξεργασίας αυτής της ευχής.' });
         }
