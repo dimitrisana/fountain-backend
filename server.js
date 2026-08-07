@@ -214,9 +214,9 @@ app.put('/api/wishes/:id', authenticateToken, async (req, res) => {
 
 // --- STRIPE CHECKOUT SESSION ENDPOINT ---
 
-app.post('/api/create-checkout-session', authenticateToken, async (req, res) => {
+app.post('/api/create-checkout-session', async (req, res) => {
     try {
-        const { wishText, isPublic } = req.body;
+        const { wishText, isPublic, author, userId } = req.body;
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -234,9 +234,9 @@ app.post('/api/create-checkout-session', authenticateToken, async (req, res) => 
             mode: 'payment',
             metadata: {
                 wishText: wishText || '',
-                isPublic: String(isPublic),
-                author: req.user.username,
-                userId: req.user.id
+                isPublic: isPublic !== undefined ? String(isPublic) : 'true',
+                author: author || 'Anonymous',
+                userId: userId || ''
             },
             success_url: `${CLIENT_URL}/?success=true`,
             cancel_url: `${CLIENT_URL}/?canceled=true`,
@@ -244,6 +244,7 @@ app.post('/api/create-checkout-session', authenticateToken, async (req, res) => 
 
         res.json({ id: session.id });
     } catch (err) {
+        console.error('Stripe Checkout Error:', err);
         res.status(500).json({ message: 'Stripe Checkout Error', error: err.message });
     }
 });
